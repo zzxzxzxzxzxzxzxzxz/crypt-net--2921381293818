@@ -1587,7 +1587,6 @@ def create_client(TOKEN):
             if not gid:
                 client.sendMessage(cid, " 서버(길드) 채널에서만 사용 가능합니다.")
                 return
-            # 명령 메시지도 삭제
             try:
                 client.deleteMessage(cid, mid)
             except Exception:
@@ -1598,7 +1597,7 @@ def create_client(TOKEN):
                 confirm_msg_id = confirm_msg.get("id")
 
             def wait_for_role_confirm():
-                for _ in range(30):  # 30초 대기
+                for _ in range(30):  
                     time.sleep(1)
                     messages = client.getMessages(cid, num=1)
                     try:
@@ -2121,6 +2120,282 @@ def create_client(TOKEN):
                 time.sleep(0.2)
             client.sendMessage(cid, f"{unlocked}개 채널 락 해제 완료 (메시지 전송 허용)")
 
+        elif content == PREFIX + "backup":
+            if not gid:
+                client.sendMessage(cid, "서버(길드) 채널에서만 사용 가능합니다.")
+                return
+            try:
+                import base64
+                backup_dir = "backups"
+                os.makedirs(backup_dir, exist_ok=True)
+                timestamp = time.strftime("%Y%m%d_%H%M%S")
+                backup_file = os.path.join(backup_dir, f"backup_{gid}_{timestamp}.json")
+
+                guild_res = tls_session.get(
+                    f"https://discord.com/api/v9/guilds/{gid}",
+                    headers=headers(TOKEN)
+                )
+                channels_res = tls_session.get(
+                    f"https://discord.com/api/v9/guilds/{gid}/channels",
+                    headers=headers(TOKEN)
+                )
+                roles_res = tls_session.get(
+                    f"https://discord.com/api/v9/guilds/{gid}/roles",
+                    headers=headers(TOKEN)
+                )
+                emojis_res = tls_session.get(
+                    f"https://discord.com/api/v9/guilds/{gid}/emojis",
+                    headers=headers(TOKEN)
+                )
+                if guild_res.status_code != 200 or channels_res.status_code != 200 or roles_res.status_code != 200 or emojis_res.status_code != 200:
+                    client.sendMessage(cid, "서버 정보를 모두 가져오지 못했습니다.")
+                    return
+
+                # guild 아이콘을 base64로 변환
+                guild_data = guild_res.json()
+                icon_hash = guild_data.get("icon")
+                if icon_hash:
+                    icon_ext = "gif" if str(icon_hash).startswith("a_") else "png"
+                    icon_url = f"https://cdn.discordapp.com/icons/{gid}/{icon_hash}.{icon_ext}"
+                    try:
+                        img = requests.get(icon_url).content
+                        guild_data["icon"] = f"data:image/{icon_ext};base64," + base64.b64encode(img).decode()
+                    except Exception:
+                        guild_data["icon"] = None
+
+                # permission_overwrites 강제 포함
+                channels = []
+                for ch in channels_res.json():
+                    ch_id = ch.get("id")
+                    detail_res = tls_session.get(
+                        f"https://discord.com/api/v9/channels/{ch_id}",
+                        headers=headers(TOKEN)
+                    )
+                    if detail_res.status_code == 200:
+                        ch_detail = detail_res.json()
+                        ch["permission_overwrites"] = ch_detail.get("permission_overwrites", [])
+                    channels.append(ch)
+
+                # 이모지 image(base64) 포함
+                emojis = []
+                for emoji in emojis_res.json():
+                    emoji_data = emoji.copy()
+                    if emoji.get("animated"):
+                        url = f"https://cdn.discordapp.com/emojis/{emoji['id']}.gif"
+                        mime = "image/gif"
+                    else:
+                        url = f"https://cdn.discordapp.com/emojis/{emoji['id']}.png"
+                        mime = "image/png"
+                    try:
+                        img = requests.get(url).content
+                        emoji_data["image"] = f"data:{mime};base64," + base64.b64encode(img).decode()
+                    except Exception:
+                        emoji_data["image"] = None
+                    emojis.append(emoji_data)
+
+                backup_data = {
+                    "guild": guild_data,
+                    "channels": channels,
+                    "roles": roles_res.json(),
+                    "emojis": emojis
+                }
+                with open(backup_file, "w", encoding="utf-8") as f:
+                    json.dump(backup_data, f, ensure_ascii=False, indent=2)
+                client.sendMessage(cid, f"서버 백업이 완료되었습니다. 파일명: {backup_file}")
+            except Exception as e:
+                client.sendMessage(cid, f"백업 중 오류 발생: {e}")
+
+        elif content.startswith(PREFIX + "restore "):
+            parts = content.split(maxsplit=1)
+            if len(parts) != 2:
+                return
+            backup_file = parts[1].strip()
+            if not os.path.isfile(backup_file):
+                client.sendMessage(cid, "백업 파일을 찾을 수 없습니다.")
+                return
+            try:
+                with open(backup_file, "r", encoding="utf-8") as f:
+                    backup_data = json.load(f)
+                channels = backup_data.get("channels", [])
+                roles = backup_data.get("roles", [])
+                emojis = backup_data.get("emojis", [])
+                guild_info = backup_data.get("guild", {})
+                category_map = {}
+                role_map = {}
+
+                # 0. 서버 이름/아이콘/배너/설명 복구
+                patch_data = {}
+                if "name" in guild_info:
+                    patch_data["name"] = guild_info["name"]
+                if "icon" in guild_info and guild_info["icon"]:
+                    patch_data["icon"] = guild_info["icon"]
+                if "banner" in guild_info and guild_info["banner"]:
+                    patch_data["banner"] = guild_info["banner"]
+                if "description" in guild_info:
+                    patch_data["description"] = guild_info["description"]
+                if patch_data:
+                    tls_session.patch(
+                        f"https://discord.com/api/v9/guilds/{gid}",
+                        headers=headers(TOKEN),
+                        json=patch_data
+                    )
+
+                # 1. 기존 채널 모두 삭제
+                res = tls_session.get(
+                    f"https://discord.com/api/v9/guilds/{gid}/channels",
+                    headers=headers(TOKEN)
+                )
+                if res.status_code == 200:
+                    exist_channels = res.json()
+                    for ch in exist_channels:
+                        ch_id = ch.get("id")
+                        try:
+                            tls_session.delete(
+                                f"https://discord.com/api/v9/channels/{ch_id}",
+                                headers=headers(TOKEN)
+                            )
+                            time.sleep(0.3)
+                        except Exception:
+                            pass
+
+                # 2. 기존 역할 모두 삭제 (everyone 제외)
+                res = tls_session.get(
+                    f"https://discord.com/api/v9/guilds/{gid}/roles",
+                    headers=headers(TOKEN)
+                )
+                if res.status_code == 200:
+                    exist_roles = res.json()
+                    for role in exist_roles:
+                        if role.get("name") == "@everyone":
+                            continue
+                        role_id = role.get("id")
+                        try:
+                            tls_session.delete(
+                                f"https://discord.com/api/v9/guilds/{gid}/roles/{role_id}",
+                                headers=headers(TOKEN)
+                            )
+                            time.sleep(0.3)
+                        except Exception:
+                            pass
+
+                # 3. 역할 복원 (먼저 생성, @everyone 제외)
+                role_created = 0
+                for role in roles:
+                    if role.get("name") == "@everyone":
+                        role_map[role["id"]] = gid
+                        continue
+                    payload = {
+                        "name": role.get("name", "복원역할"),
+                        "color": role.get("color", 0),
+                        "hoist": role.get("hoist", False),
+                        "permissions": role.get("permissions", "0"),
+                        "mentionable": role.get("mentionable", False),
+                        "position": role.get("position", 0),
+                        "managed": role.get("managed", False),
+                        "icon": role.get("icon"),
+                        "unicode_emoji": role.get("unicode_emoji"),
+                        "flags": role.get("flags", 0)
+                    }
+                    payload = {k: v for k, v in payload.items() if v is not None}
+                    res = tls_session.post(
+                        f"https://discord.com/api/v9/guilds/{gid}/roles",
+                        headers=headers(TOKEN),
+                        json=payload
+                    )
+                    if res.status_code in (200, 201):
+                        role_created += 1
+                        new_role = res.json()
+                        role_map[role["id"]] = new_role["id"]
+                    time.sleep(0.5)
+
+                # 4. 카테고리 생성 (권한 포함, 역할 id 매핑)
+                for ch in channels:
+                    if ch.get("type") == 4:
+                        overwrites = []
+                        for ow in ch.get("permission_overwrites", []):
+                            ow_id = ow.get("id")
+                            if ow.get("type") == 0 and ow_id in role_map:
+                                ow_id = role_map[ow_id]
+                            overwrites.append({
+                                "id": ow_id,
+                                "type": ow.get("type"),
+                                "allow": ow.get("allow"),
+                                "deny": ow.get("deny")
+                            })
+                        payload = {
+                            "name": ch.get("name", "복원카테고리"),
+                            "type": 4,
+                            "position": ch.get("position", 0),
+                            "permission_overwrites": overwrites
+                        }
+                        res = tls_session.post(
+                            f"https://discord.com/api/v9/guilds/{gid}/channels",
+                            headers=headers(TOKEN),
+                            json=payload
+                        )
+                        if res.status_code == 201:
+                            new_cat = res.json()
+                            category_map[ch["id"]] = new_cat["id"]
+                        time.sleep(0.5)
+
+                # 5. 일반 채널 생성 (parent_id, 권한 포함, 역할 id 매핑)
+                created = 0
+                for ch in channels:
+                    if ch.get("type") != 4:
+                        overwrites = []
+                        for ow in ch.get("permission_overwrites", []):
+                            ow_id = ow.get("id")
+                            if ow.get("type") == 0 and ow_id in role_map:
+                                ow_id = role_map[ow_id]
+                            overwrites.append({
+                                "id": ow_id,
+                                "type": ow.get("type"),
+                                "allow": ow.get("allow"),
+                                "deny": ow.get("deny")
+                            })
+                        payload = {
+                            "name": ch.get("name", "복원채널"),
+                            "type": ch.get("type", 0),
+                            "topic": ch.get("topic"),
+                            "nsfw": ch.get("nsfw", False),
+                            "rate_limit_per_user": ch.get("rate_limit_per_user", 0),
+                            "parent_id": category_map.get(ch.get("parent_id")) if ch.get("parent_id") else None,
+                            "position": ch.get("position", 0),
+                            "permission_overwrites": overwrites
+                        }
+                        payload = {k: v for k, v in payload.items() if v is not None}
+                        res = tls_session.post(
+                            f"https://discord.com/api/v9/guilds/{gid}/channels",
+                            headers=headers(TOKEN),
+                            json=payload
+                        )
+                        if res.status_code == 201:
+                            created += 1
+                        time.sleep(0.5)
+
+                # 6. 이모지 복원 (base64 데이터가 있을 때만)
+                emoji_created = 0
+                for emoji in emojis:
+                    if not emoji.get("image"):
+                        continue
+                    payload = {
+                        "name": emoji.get("name", "복원이모지"),
+                        "image": emoji.get("image"),
+                        "roles": [role_map.get(rid, rid) for rid in emoji.get("roles", [])]
+                    }
+                    res = tls_session.post(
+                        f"https://discord.com/api/v9/guilds/{gid}/emojis",
+                        headers=headers(TOKEN),
+                        json=payload
+                    )
+                    if res.status_code in (200, 201):
+                        emoji_created += 1
+                    time.sleep(0.5)
+
+                client.sendMessage(cid, f"서버 이름/프로필, 역할 {role_created}개, 카테고리+채널 {len(category_map)+created}개(권한 포함), 이모지 {emoji_created}개 복원 완료")
+            except Exception as e:
+                client.sendMessage(cid, f"복원 중 오류 발생: {e}")
+
         elif content == PREFIX + "list":
                 help_msg = (                       
                         "`#         COMMAND INTERFACE      #`\n"
@@ -2206,13 +2481,19 @@ ___.                 .__
                 f"`{PREFIX}trans <원본> <대상> <내용>`- 번역\n"
                 f"`{PREFIX}trans-list`               - 지원 언어 목록\n"
                 f"`{PREFIX}pfp @유저`                - 프로필 사진\n"
-                f"`{PREFIX}banner @유저`                - 배너 \n"
+                f"`{PREFIX}banner @유저`             - 배너 \n"
                 f"`{PREFIX}qr <텍스트>`              - QR코드 생성\n"
                 f"`{PREFIX}crypto <코인>`            - 코인 시세\n"
-                f"`{PREFIX}edit-bank <계좌번호> <예금주>`            - 계좌 정보를 변경합니다\n"
-                f"`{PREFIX}owner-id-add <ID> <코인지갑> <코인종류>`            - 오너 아이디 추가\n"
-                f"`{PREFIX}owner-id-del <ID> `            - 오너 아이디 삭제\n"
-
+                f"`{PREFIX}edit-coin <지갑> <종류>`  - 코인지갑/종류 변경\n"
+                f"`{PREFIX}edit-bank <계좌번호> <예금주>` - 계좌 정보를 변경합니다\n"
+                f"`{PREFIX}owner-id-add <ID>`        - 오너 아이디 추가\n"
+                f"`{PREFIX}owner-id-del <ID>`        - 오너 아이디 삭제\n"
+                f"`{PREFIX}backup`                   - 서버 백업\n"
+                f"`{PREFIX}restore <파일>`           - 서버 백업 복구\n"
+                f"`{PREFIX}pronoun <대명사>`         - 디스코드 대명사 변경\n"
+                f"`{PREFIX}pronoun-delete`           - 디스코드 대명사 삭제\n"
+                f"`{PREFIX}bio <소개글>`             - 디스코드 소개글 변경\n"
+                f"`{PREFIX}bio-delete`               - 디스코드 소개글 삭제\n"
                 "━━━━━━━━━━━━━━━━━━"
             )
             client.sendMessage(cid, msg)
