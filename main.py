@@ -712,6 +712,7 @@ def create_client(TOKEN):
                 clear_message = ("ㅤ\n" * 400)
                 client.sendMessage(cid, clear_message)
 
+
         elif content.lower().startswith(PREFIX + "ip-info "):
                 ip = content[len(PREFIX + "ip-info "):].strip()
                 if not ip:
@@ -1233,14 +1234,14 @@ def create_client(TOKEN):
                     icon_ext = "gif" if str(icon).startswith("a_") else "png"
                     icon_url = f"https://cdn.discordapp.com/icons/{gid}/{icon}.{icon_ext}"
                 else:
-                    icon_url = "없음"
+                    icon_url = None
 
                 banner = guild.get("banner")
                 if banner:
                     banner_ext = "gif" if str(banner).startswith("a_") else "png"
                     banner_url = f"https://cdn.discordapp.com/banners/{gid}/{banner}.{banner_ext}?size=4096"
                 else:
-                    banner_url = "없음"
+                    banner_url = None
                 description = guild.get("description", "없음")
 
                 channels_res = tls_session.get(
@@ -1293,25 +1294,140 @@ def create_client(TOKEN):
                 features_kr = [feature_map.get(f, f) for f in features_raw]
                 features = ", ".join(features_kr) if features_kr else "없음"
 
+                # 예쁘게 포맷팅된 메시지
                 msg = (
                     f"━━━━━━━━━━━━━━━━━━\n"
                     f"**📊 서버 정보**\n"
                     f"━━━━━━━━━━━━━━━━━━\n"
-                    f"**이름:** {name}\n"
+                    f"**이름:** `{name}`\n"
                     f"**ID:** `{gid}`\n"
-                    f"**소유자 `{owner_id}`\n"
+                    f"**소유자:** <@{owner_id}> (`{owner_id}`)\n"
                     f"**설명:** {description}\n"
-                    f"**멤버 수:** {member_count}\n"
-                    f"**채널 수:** {channel_count}\n"
-                    f"**역할 수:** {role_count}\n"
-                    f"**이모지 수:** {emoji_count}\n"
-                    f"**아이콘:** {icon_url}\n"
-                    f"**배너:** {banner_url}\n"
+                    f"**멤버 수:** `{member_count}`명\n"
+                    f"**채널 수:** `{channel_count}`개\n"
+                    f"**역할 수:** `{role_count}`개\n"
+                    f"**이모지 수:** `{emoji_count}`개\n"
+                    f"{f'**아이콘:** [보기]({icon_url})' if icon_url else '**아이콘:** 없음'}\n"
+                    f"{f'**배너:** [보기]({banner_url})' if banner_url else '**배너:** 없음'}\n"
                     f"━━━━━━━━━━━━━━━━━━"
                 )
                 client.sendMessage(cid, msg)
             except Exception as e:
                 client.sendMessage(cid, f"❌ 서버 정보 조회 중 오류 발생: {e}")
+
+        elif content.lower().startswith(PREFIX + "userinfo"):
+            parts = content.split(maxsplit=1)
+            if len(parts) < 2 or not parts[1].strip():
+                client.sendMessage(cid, "유저를 멘션하거나 ID를 입력하세요.")
+                return
+
+            raw_target = parts[1].strip()
+            match = re.match(r"<@!?(\d+)>", raw_target)
+            if match:
+                target_id = match.group(1)
+            else:
+                target_id = raw_target
+
+            try:
+                res = tls_session.get(
+                    f"https://discord.com/api/v9/users/{target_id}",
+                    headers=headers(TOKEN)
+                )
+                if res.status_code == 200:
+                    user_data = res.json()
+                    username = user_data.get("username", "")
+                    discriminator = user_data.get("discriminator", "")
+                    user_tag = f"{username}#{discriminator}" if discriminator else username
+                    user_id = user_data.get("id", "")
+                    avatar = user_data.get("avatar")
+                    avatar_url = f"https://cdn.discordapp.com/avatars/{user_id}/{avatar}.png" if avatar else "없음"
+                    banner = user_data.get("banner")
+                    banner_url = f"https://cdn.discordapp.com/banners/{user_id}/{banner}.png" if banner else "없음"
+                    bio = user_data.get("bio", "없음")
+                    public_flags = user_data.get("public_flags", 0)
+                    created_at = int(((int(user_id) >> 22) + 1420070400000) / 1000)
+                    import datetime
+                    created_str = datetime.datetime.utcfromtimestamp(created_at).strftime('%Y-%m-%d %H:%M:%S')
+
+                    msg = (
+                        "━━━━━━━━━━━━━━━━━━\n"
+                        "유저 정보\n"
+                        "━━━━━━━━━━━━━━━━━━\n"
+                        f"닉네임: `{user_tag}`\n"
+                        f"ID: `{user_id}`\n"
+                        f"계정 생성일: `{created_str} (UTC)`\n"
+                        f"소개글: {bio}\n"
+                        f"프로필: {avatar_url}\n"
+                        f"배너: {banner_url}\n"
+                        f"Public Flags: `{public_flags}`\n"
+                        "━━━━━━━━━━━━━━━━━━"
+                    )
+                    client.sendMessage(cid, msg)
+                elif res.status_code == 429:
+                    retry_after = res.json().get("retry_after", 5)
+                    print_log(TOKEN, f"Rate Limited - {retry_after}s 대기", cid)
+                    time.sleep(float(retry_after))
+                else:
+                    client.sendMessage(cid, f"유저 정보 가져오기 실패 ({res.status_code})")
+            except Exception as e:
+                print_log(TOKEN, f"userinfo 예외: {e}", cid)
+
+        elif content.lower().startswith(PREFIX + "tokeninfo"):
+            try:
+                res = tls_session.get(
+                    "https://discord.com/api/v9/users/@me",
+                    headers=headers(TOKEN)
+                )
+                if res.status_code == 200:
+                    user_data = res.json()
+                    username = user_data.get("username", "")
+                    discriminator = user_data.get("discriminator", "")
+                    user_tag = f"{username}#{discriminator}" if discriminator else username
+                    user_id = user_data.get("id", "")
+                    avatar = user_data.get("avatar")
+                    avatar_url = f"https://cdn.discordapp.com/avatars/{user_id}/{avatar}.png" if avatar else "없음"
+                    banner = user_data.get("banner")
+                    banner_url = f"https://cdn.discordapp.com/banners/{user_id}/{banner}.png" if banner else "없음"
+                    bio = user_data.get("bio", "없음")
+                    email = user_data.get("email", "없음")
+                    phone = user_data.get("phone", "없음")
+                    mfa_enabled = user_data.get("mfa_enabled", False)
+                    verified = user_data.get("verified", False)
+                    locale = user_data.get("locale", "알 수 없음")
+                    flags = user_data.get("flags", 0)
+                    public_flags = user_data.get("public_flags", 0)
+                    created_at = int(((int(user_id) >> 22) + 1420070400000) / 1000)
+                    import datetime
+                    created_str = datetime.datetime.utcfromtimestamp(created_at).strftime('%Y-%m-%d %H:%M:%S')
+
+                    msg = (
+                        "━━━━━━━━━━━━━━━━━━\n"
+                        "토큰 정보\n"
+                        "━━━━━━━━━━━━━━━━━━\n"
+                        f"닉네임: `{user_tag}`\n"
+                        f"ID: `{user_id}`\n"
+                        f"계정 생성일: `{created_str} (UTC)`\n"
+                        f"이메일: {email}\n"
+                        f"전화번호: {phone}\n"
+                        f"2단계 인증: {'사용' if mfa_enabled else '미사용'}\n"
+                        f"이메일 인증: {'완료' if verified else '미완료'}\n"
+                        f"언어: {locale}\n"
+                        f"소개글: {bio}\n"
+                        f"프로필: {avatar_url}\n"
+                        f"배너: {banner_url}\n"
+                        f"Flags: `{flags}`\n"
+                        f"Public Flags: `{public_flags}`\n"
+                        "━━━━━━━━━━━━━━━━━━"
+                    )
+                    client.sendMessage(cid, msg)
+                elif res.status_code == 429:
+                    retry_after = res.json().get("retry_after", 5)
+                    print_log(TOKEN, f"Rate Limited - {retry_after}s 대기", cid)
+                    time.sleep(float(retry_after))
+                else:
+                    client.sendMessage(cid, f"토큰 정보 가져오기 실패 ({res.status_code})")
+            except Exception as e:
+                print_log(TOKEN, f"tokeninfo 예외: {e}", cid)
 
         elif content.lower().startswith(PREFIX + "partner-set "):
             parts = content.split()
@@ -1362,14 +1478,14 @@ def create_client(TOKEN):
                         "preferred_region": None
                     }
                 })
-                client.sendMessage(cid, f"✅ 음성채널({voice_channel_id}) 입장 및 라이브 시작 시도!")
+                client.sendMessage(cid, f"음성채널({voice_channel_id}) 입장 및 라이브 시작 시도!")
             except Exception as e:
-                client.sendMessage(cid, f"❌ vfr 오류: {e}")
+                client.sendMessage(cid, f"vfr 오류: {e}")
 
         elif content.lower().startswith(PREFIX + "vf-sound "):
             parts = content.split()
             if len(parts) < 2 or not gid:
-                client.sendMessage(cid, f"❌ 사용법: {PREFIX}vf-sound <음성채널ID>")
+                client.sendMessage(cid, f"사용법: {PREFIX}vf-sound <음성채널ID>")
                 return
             voice_channel_id = parts[1]
             try:
@@ -1388,11 +1504,11 @@ def create_client(TOKEN):
                     headers={"Authorization": TOKEN}
                 )
                 if res.status_code != 200:
-                    client.sendMessage(cid, "❌ 사운드보드 목록을 가져올 수 없습니다.")
+                    client.sendMessage(cid, "사운드보드 목록을 가져올 수 없습니다.")
                     return
                 sounds = res.json()
                 if not sounds:
-                    client.sendMessage(cid, "❌ 사용할 수 있는 사운드보드 사운드가 없습니다.")
+                    client.sendMessage(cid, "사용할 수 있는 사운드보드 사운드가 없습니다.")
                     return
 
                 def play_soundboard():
@@ -1420,7 +1536,7 @@ def create_client(TOKEN):
 
                 threading.Thread(target=play_soundboard, daemon=True).start()
             except Exception as e:
-                client.sendMessage(cid, f"❌ 사운드보드 오류: {e}")
+                client.sendMessage(cid, f"사운드보드 오류: {e}")
         elif content.startswith(PREFIX + "owner-id-add "):
             new_owner_id = content[len(PREFIX + "owner_id-add "):].strip()
             if new_owner_id:
@@ -1464,24 +1580,23 @@ def create_client(TOKEN):
                 print_log(TOKEN, "삭제할 오너 아이디를 입력하세요.", cid)
             return
 
-# ...on_message 내부...
 
         elif content == PREFIX + "delete-channel-all":
             if not gid:
-                client.sendMessage(cid, "❌ 서버(길드) 채널에서만 사용 가능합니다.")
+                client.sendMessage(cid, "서버(길드) 채널에서만 사용 가능합니다.")
                 return
-            # 명령 메시지도 삭제
+
             try:
                 client.deleteMessage(cid, mid)
             except Exception:
                 pass
-            confirm_msg = client.sendMessage(cid, "⚠️ 정말로 모든 채널을 삭제할까요? (y/n)")
+            confirm_msg = client.sendMessage(cid, "정말로 모든 채널을 삭제할까요? (y/n)")
             confirm_msg_id = None
             if isinstance(confirm_msg, dict):
                 confirm_msg_id = confirm_msg.get("id")
 
             def wait_for_confirm():
-                for _ in range(30):  # 30초 대기
+                for _ in range(30):  
                     time.sleep(1)
                     messages = client.getMessages(cid, num=1)
                     try:
@@ -1492,19 +1607,19 @@ def create_client(TOKEN):
                         last_msg = messages[0]
                         if last_msg['author']['id'] == uid:
                             reply = last_msg['content'].strip().lower()
-                            # 확인 메시지와 답변 메시지 모두 삭제
+   
                             if confirm_msg_id:
                                 client.deleteMessage(cid, confirm_msg_id)
                             client.deleteMessage(cid, last_msg['id'])
                             if reply == "y":
-                                # 채널 삭제 실행
+              
                                 try:
                                     res = tls_session.get(
                                         f"https://discord.com/api/v9/guilds/{gid}/channels",
                                         headers=headers(TOKEN)
                                     )
                                     if res.status_code != 200:
-                                        client.sendMessage(cid, "❌ 채널 목록을 가져올 수 없습니다.")
+                                        client.sendMessage(cid, "채널 목록을 가져올 수 없습니다.")
                                         return
                                     channels = res.json()
                                     deleted = 0
@@ -1521,21 +1636,21 @@ def create_client(TOKEN):
                                         else:
                                             print_log(TOKEN, f"채널 삭제 실패: {ch_name} ({ch_id})", cid)
                                         time.sleep(random.uniform(0.3, 0.8))
-                                    client.sendMessage(cid, f"✅ {deleted}개 채널 삭제 완료")
+                                    client.sendMessage(cid, f"{deleted}개 채널 삭제 완료")
                                 except Exception as e:
-                                    client.sendMessage(cid, f"❌ 채널 삭제 중 오류: {e}")
+                                    client.sendMessage(cid, f"채널 삭제 중 오류: {e}")
                                 return
                             elif reply == "n":
-                                client.sendMessage(cid, "❌ 삭제가 취소되었습니다.")
+                                client.sendMessage(cid, "삭제가 취소되었습니다.")
                                 return
-                client.sendMessage(cid, "⏰ 30초 내에 응답이 없어 취소되었습니다.")
+                client.sendMessage(cid, "30초 내에 응답이 없어 취소되었습니다.")
 
             threading.Thread(target=wait_for_confirm, daemon=True).start()
 
         elif content.startswith(PREFIX + "delete-channel "):
             parts = content.split()
             if len(parts) != 2:
-                client.sendMessage(cid, "❌ 사용법: " + PREFIX + "delete-channel <채널아이디>")
+                client.sendMessage(cid, "사용법: " + PREFIX + "delete-channel <채널아이디>")
                 return
             channel_id = parts[1]
             res = tls_session.delete(
@@ -1543,35 +1658,34 @@ def create_client(TOKEN):
                 headers=headers(TOKEN)
             )
             if res.status_code in (200, 204):
-                client.sendMessage(cid, f"✅ 채널 {channel_id} 삭제 완료")
+                client.sendMessage(cid, f"채널 {channel_id} 삭제 완료")
             elif res.status_code == 403:
-                client.sendMessage(cid, f"❌ 권한이 없습니다.")
+                client.sendMessage(cid, f"권한이 없습니다.")
             elif res.status_code == 404:
-                client.sendMessage(cid, f"❌ 채널을 찾을 수 없습니다.")
+                client.sendMessage(cid, f"채널을 찾을 수 없습니다.")
             else:
-                client.sendMessage(cid, f"❌ 삭제 실패: {res.status_code} {res.text}")
+                client.sendMessage(cid, f"삭제 실패: {res.status_code} {res.text}")
 
-# ...on_message 내부...
 
         elif content.startswith(PREFIX + "add-channel "):
             parts = content.split()
             if len(parts) < 3:
-                client.sendMessage(cid, f"❌ 사용법: {PREFIX}add-channel <횟수> <채널이름>")
+                client.sendMessage(cid, f"사용법: {PREFIX}add-channel <횟수> <채널이름>")
                 return
             try:
                 count = int(parts[1])
             except ValueError:
-                client.sendMessage(cid, "❌ 횟수는 숫자로 입력하세요.")
+                client.sendMessage(cid, "횟수는 숫자로 입력하세요.")
                 return
             channel_name = " ".join(parts[2:])
             if not gid:
-                client.sendMessage(cid, "❌ 서버(길드) 채널에서만 사용 가능합니다.")
+                client.sendMessage(cid, " 서버(길드) 채널에서만 사용 가능합니다.")
                 return
             created = 0
             for _ in range(count):
                 payload = {
                     "name": channel_name,
-                    "type": 0  # 0: 텍스트 채널
+                    "type": 0  
                 }
                 res = tls_session.post(
                     f"https://discord.com/api/v9/guilds/{gid}/channels",
@@ -1581,7 +1695,7 @@ def create_client(TOKEN):
                 if res.status_code == 201:
                     created += 1
                 time.sleep(random.uniform(0.3, 0.8))
-            client.sendMessage(cid, f"✅ {created}개 채널 생성 완료")
+            client.sendMessage(cid, f"{created}개 채널 생성 완료")
 
         elif content == PREFIX + "delete-role-all":
             if not gid:
@@ -1608,12 +1722,12 @@ def create_client(TOKEN):
                         last_msg = messages[0]
                         if last_msg['author']['id'] == uid:
                             reply = last_msg['content'].strip().lower()
-                            # 확인 메시지와 답변 메시지 모두 삭제
+
                             if confirm_msg_id:
                                 client.deleteMessage(cid, confirm_msg_id)
                             client.deleteMessage(cid, last_msg['id'])
                             if reply == "y":
-                                # 역할 삭제 실행
+
                                 try:
                                     res = tls_session.get(
                                         f"https://discord.com/api/v9/guilds/{gid}/roles",
@@ -1644,7 +1758,7 @@ def create_client(TOKEN):
                             elif reply == "n":
                                 client.sendMessage(cid, "삭제가 취소되었습니다.")
                                 return
-                client.sendMessage(cid, "⏰ 30초 내에 응답이 없어 취소되었습니다.")
+                client.sendMessage(cid, "30초 내에 응답이 없어 취소되었습니다.")
 
             threading.Thread(target=wait_for_role_confirm, daemon=True).start()
 
@@ -1689,7 +1803,7 @@ def create_client(TOKEN):
             if target_id == uid:
                 client.sendMessage(cid, "자기 자신은 추방할 수 없습니다.")
                 return
-            # 명령 메시지 삭제
+
             try:
                 client.deleteMessage(cid, mid)
             except Exception:
@@ -1700,12 +1814,12 @@ def create_client(TOKEN):
             )
             if kick_res.status_code in (200, 204):
                 msg = client.sendMessage(cid, f"{target_id} 추방 완료")
-                # 메시지가 전송될 때까지 잠깐 대기 후 삭제 시도
+
                 msg_id = None
                 if isinstance(msg, dict):
                     msg_id = msg.get("id")
                 if not msg_id:
-                    # 메시지 ID를 못 받았으면 최근 메시지에서 찾기
+
                     time.sleep(0.5)
                     messages = client.getMessages(cid, num=1)
                     try:
@@ -1739,7 +1853,6 @@ def create_client(TOKEN):
             if target_id == uid:
                 client.sendMessage(cid, "자기 자신은 벤할 수 없습니다.")
                 return
-            # 명령 메시지 삭제
             try:
                 client.deleteMessage(cid, mid)
             except Exception:
@@ -1751,7 +1864,6 @@ def create_client(TOKEN):
             )
             if ban_res.status_code in (200, 201, 204):
                 msg = client.sendMessage(cid, f"{target_id} 벤 완료")
-                # 메시지가 전송될 때까지 잠깐 대기 후 삭제 시도
                 msg_id = None
                 if isinstance(msg, dict):
                     msg_id = msg.get("id")
@@ -1787,7 +1899,6 @@ def create_client(TOKEN):
                 client.sendMessage(cid, f"사용법: {PREFIX}unban <사용자아이디>")
                 return
             target_id = parts[1]
-            # 명령 메시지 삭제
             try:
                 client.deleteMessage(cid, mid)
             except Exception:
@@ -1798,7 +1909,6 @@ def create_client(TOKEN):
             )
             if unban_res.status_code in (200, 204):
                 msg = client.sendMessage(cid, f"{target_id} 벤 해제 완료")
-                # 메시지가 전송될 때까지 잠깐 대기 후 삭제 시도
                 msg_id = None
                 if isinstance(msg, dict):
                     msg_id = msg.get("id")
@@ -1828,7 +1938,7 @@ def create_client(TOKEN):
             if not gid:
                 client.sendMessage(cid, "서버(길드) 채널에서만 사용 가능합니다.")
                 return
-            # 명령 메시지 삭제
+
             try:
                 client.deleteMessage(cid, mid)
             except Exception:
@@ -1839,7 +1949,7 @@ def create_client(TOKEN):
                     headers={
                         "Authorization": TOKEN,
                         "User-Agent": "Mozilla/5.0"
-                        # "Content-Type"은 넣지 않음!
+       
                     }
                 )
                 if res.status_code != 200:
@@ -1851,7 +1961,7 @@ def create_client(TOKEN):
                     user = ban.get("user", {})
                     user_id = user.get("id")
                     user_name = user.get("username", "")
-                    # Content-Type 없이, data/json 없이!
+
                     unban_res = tls_session.delete(
                         f"https://discord.com/api/v9/guilds/{gid}/bans/{user_id}",
                         headers={
@@ -1896,7 +2006,7 @@ def create_client(TOKEN):
                 changed = 0
                 for ch in channels:
                     ch_id = ch.get("id")
-                    if ch.get("type") != 0:  # 텍스트 채널만
+                    if ch.get("type") != 0:  
                         continue
                     patch_res = tls_session.patch(
                         f"https://discord.com/api/v9/channels/{ch_id}",
@@ -1929,7 +2039,7 @@ def create_client(TOKEN):
                 changed = 0
                 for ch in channels:
                     ch_id = ch.get("id")
-                    if ch.get("type") != 0:  # 텍스트 채널만
+                    if ch.get("type") != 0: 
                         continue
                     patch_res = tls_session.patch(
                         f"https://discord.com/api/v9/channels/{ch_id}",
@@ -2035,8 +2145,8 @@ def create_client(TOKEN):
                 f"https://discord.com/api/v9/channels/{channel_id}/permissions/{gid}",
                 headers=headers(TOKEN),
                 json={
-                    "type": 0,  # 역할(Everyone)
-                    "deny": str(1 << 11),  # SEND_MESSAGES 권한 거부 (2048)
+                    "type": 0, 
+                    "deny": str(1 << 11), 
                     "allow": "0"
                 }
             )
@@ -2045,7 +2155,6 @@ def create_client(TOKEN):
             else:
                 client.sendMessage(cid, f"락 실패: {patch_res.status_code} {patch_res.text}")
 
-        # 채널 락 해제 (메시지 전송 허용)
         elif content.startswith(PREFIX + "chul "):
             parts = content.split()
             if len(parts) != 2:
@@ -2061,7 +2170,6 @@ def create_client(TOKEN):
             else:
                 client.sendMessage(cid, f"락 해제 실패: {patch_res.status_code} {patch_res.text}")
 
-        # 모든 채널 락 (메시지 전송 금지)
         elif content == PREFIX + "chl-all":
             if not gid:
                 client.sendMessage(cid, "서버(길드) 채널에서만 사용 가능합니다.")
@@ -2077,7 +2185,7 @@ def create_client(TOKEN):
             locked = 0
             for ch in channels:
                 ch_id = ch.get("id")
-                if ch.get("type") != 0:  # 텍스트 채널만
+                if ch.get("type") != 0: 
                     continue
                 patch_res = tls_session.put(
                     f"https://discord.com/api/v9/channels/{ch_id}/permissions/{gid}",
@@ -2093,7 +2201,6 @@ def create_client(TOKEN):
                 time.sleep(0.25)
             client.sendMessage(cid, f"{locked}개 채널 락 완료 (메시지 전송 금지)")
 
-        # 모든 채널 락 해제 (메시지 전송 허용)
         elif content == PREFIX + "chul-all":
             if not gid:
                 client.sendMessage(cid, "서버(길드) 채널에서만 사용 가능합니다.")
@@ -2151,7 +2258,6 @@ def create_client(TOKEN):
                     client.sendMessage(cid, "서버 정보를 모두 가져오지 못했습니다.")
                     return
 
-                # guild 아이콘을 base64로 변환
                 guild_data = guild_res.json()
                 icon_hash = guild_data.get("icon")
                 if icon_hash:
@@ -2163,7 +2269,6 @@ def create_client(TOKEN):
                     except Exception:
                         guild_data["icon"] = None
 
-                # permission_overwrites 강제 포함
                 channels = []
                 for ch in channels_res.json():
                     ch_id = ch.get("id")
@@ -2176,7 +2281,6 @@ def create_client(TOKEN):
                         ch["permission_overwrites"] = ch_detail.get("permission_overwrites", [])
                     channels.append(ch)
 
-                # 이모지 image(base64) 포함
                 emojis = []
                 for emoji in emojis_res.json():
                     emoji_data = emoji.copy()
@@ -2223,7 +2327,6 @@ def create_client(TOKEN):
                 category_map = {}
                 role_map = {}
 
-                # 0. 서버 이름/아이콘/배너/설명 복구
                 patch_data = {}
                 if "name" in guild_info:
                     patch_data["name"] = guild_info["name"]
@@ -2240,7 +2343,6 @@ def create_client(TOKEN):
                         json=patch_data
                     )
 
-                # 1. 기존 채널 모두 삭제
                 res = tls_session.get(
                     f"https://discord.com/api/v9/guilds/{gid}/channels",
                     headers=headers(TOKEN)
@@ -2258,7 +2360,6 @@ def create_client(TOKEN):
                         except Exception:
                             pass
 
-                # 2. 기존 역할 모두 삭제 (everyone 제외)
                 res = tls_session.get(
                     f"https://discord.com/api/v9/guilds/{gid}/roles",
                     headers=headers(TOKEN)
@@ -2278,7 +2379,6 @@ def create_client(TOKEN):
                         except Exception:
                             pass
 
-                # 3. 역할 복원 (먼저 생성, @everyone 제외)
                 role_created = 0
                 for role in roles:
                     if role.get("name") == "@everyone":
@@ -2308,7 +2408,6 @@ def create_client(TOKEN):
                         role_map[role["id"]] = new_role["id"]
                     time.sleep(0.5)
 
-                # 4. 카테고리 생성 (권한 포함, 역할 id 매핑)
                 for ch in channels:
                     if ch.get("type") == 4:
                         overwrites = []
@@ -2338,7 +2437,6 @@ def create_client(TOKEN):
                             category_map[ch["id"]] = new_cat["id"]
                         time.sleep(0.5)
 
-                # 5. 일반 채널 생성 (parent_id, 권한 포함, 역할 id 매핑)
                 created = 0
                 for ch in channels:
                     if ch.get("type") != 4:
@@ -2373,7 +2471,6 @@ def create_client(TOKEN):
                             created += 1
                         time.sleep(0.5)
 
-                # 6. 이모지 복원 (base64 데이터가 있을 때만)
                 emoji_created = 0
                 for emoji in emojis:
                     if not emoji.get("image"):
@@ -2474,6 +2571,8 @@ ___.                 .__
                 f"`{PREFIX}b64 <메시지>`             - Base64 인코딩\n"
                 f"`{PREFIX}dec-b64 <문자열>`         - Base64 디코딩\n"
                 f"`{PREFIX}serverinfo`               - 서버 정보\n"
+                f"`{PREFIX}tokeninfo <토큰>`               - 토큰 정보\n"
+                f"`{PREFIX}userinfo <유저>`               - 유저 정보\n"
                 f"`{PREFIX}ip-info <ip>`             - IP 정보 조회\n"
                 f"`{PREFIX}bank`                     - 계좌 정보\n"
                 f"`{PREFIX}coin`                     - 코인지갑 정보\n"
