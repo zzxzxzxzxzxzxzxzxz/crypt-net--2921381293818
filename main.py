@@ -20,9 +20,20 @@ from rich.console import Console
 from rich.text import Text
 from io import BytesIO
 
+auto_reply_map = {}
+
 user_tts_map = {}
 
 partner_auto_send = {}
+
+partner_last_reset = {}
+
+rguild_running = {}
+
+poll_threads = {}
+
+polling = {}
+
 
 badge_rotator_thread = None
 badge_rotator_running = False
@@ -45,7 +56,11 @@ ASCII_ART = """
       ░  ░ ░     ░ ░           ░        ░  
                 ░░ ░                       
 """
-
+def add_prefix_to_lines(msg, prefix="[1;31m[♰][0m"):
+    return "\n".join(
+        f"{prefix}{line}" if line.strip().startswith(PREFIX) else line
+        for line in msg.splitlines()
+    )
 def print_gradient_ascii_centered():
     try:
         width = os.get_terminal_size().columns
@@ -73,6 +88,8 @@ def print_gradient_ascii_centered():
         console.print(" " * left_padding, end="")
         console.print(text)
         time.sleep(0.1)
+
+
 
 print_gradient_ascii_centered()
 
@@ -155,18 +172,28 @@ def spam_task(TOKEN, CHANNEL_ID, MESSAGE):
     headers = {
         "Authorization": TOKEN,
         "Content-Type": "application/json",
-        "User-Agent": "Mozilla/5.0"
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "*/*",
+        "Accept-Language": "ko,en-US;q=0.9,en;q=0.8",
+        "Origin": "https://discord.com",
+        "Referer": "https://discord.com/channels/@me",
+        "X-Requested-With": "XMLHttpRequest",
+        "Sec-Fetch-Site": "same-origin",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Dest": "empty",
+        "Connection": "keep-alive"
     }
     while spamming:
         try:
+            msg = f"{MESSAGE} {random.randint(1000, 9999)}"  # 매번 다른 랜덤 숫자
             session.post(
                 f"https://discord.com/api/v9/channels/{CHANNEL_ID}/messages",
-                json={"content": MESSAGE},
+                json={"content": msg},
                 headers=headers
             )
         except:
             pass
-        time.sleep(random.uniform(0.5, 1.2))
+        time.sleep(random.uniform(0.5, 0.8)) 
 
 def parse_emoji(emj):
     if emj.startswith("<:") or emj.startswith("<a:"):
@@ -177,32 +204,32 @@ def parse_emoji(emj):
     return emj
 
 def schedule_partner_message(client, cid, count, message):
-    global partner_auto_send 
+    global partner_auto_send, partner_last_reset
     def send_loop():
         while partner_auto_send.get(cid, False):
             now = datetime.datetime.now()
-            seconds_per_send = 24 * 60 * 60 / count
-            for i in range(count):
-                if not partner_auto_send.get(cid, False):
-                    break
-                client.sendMessage(cid, f"{message}")
-                time.sleep(seconds_per_send)
+            today = now.date()
+            sent_count = 0
+            # 하루가 바뀌면 카운트 리셋
+            if partner_last_reset.get(cid) != today:
+                partner_last_reset[cid] = today
+                sent_count = 0
+            while sent_count < count and partner_auto_send.get(cid, False):
+                client.sendMessage(cid, message)
+                sent_count += 1
+                # 남은 횟수가 있으면 24/count 시간마다 전송
+                if sent_count < count:
+                    time.sleep(24 * 60 * 60 / count)
+            # 하루가 끝날 때까지 대기
+            now = datetime.datetime.now()
             tomorrow = (now + datetime.timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-            wait_sec = (tomorrow - datetime.datetime.now()).total_seconds()
+            wait_sec = (tomorrow - now).total_seconds()
             if wait_sec > 0:
-                time.sleep(wait_sec)
+                for _ in range(int(wait_sec)):
+                    if not partner_auto_send.get(cid, False):
+                        break
+                    time.sleep(1)
     threading.Thread(target=send_loop, daemon=True).start()
-def change_guild_tag(tls_session, token, guild_id, new_tag):
-
-    url = f"https://discord.com/api/v9/users/@me/guild-profiles/{guild_id}"
-    headers = {
-        "Authorization": token,
-        "Content-Type": "application/json",
-        "User-Agent": "Mozilla/5.0"
-    }
-    payload = {"tag": new_tag}
-    res = tls_session.patch(url, headers=headers, json=payload)
-    return res
 
 def create_client(TOKEN):
     client = discum.Client(token=TOKEN, log=False)
@@ -210,6 +237,8 @@ def create_client(TOKEN):
     rename_active = {}
     emoji_map = {}
     pinned_users = set()
+
+
 
 
 
@@ -328,6 +357,40 @@ def create_client(TOKEN):
             return f"💰 {coin_fullname} 가격: ${price:,.2f}"
         except Exception as e:
             return f"암호화폐 정보를 가져올 수 없습니다. 오류: {e}"
+        
+    def poll_task(token, channel_id, question, choices):
+        session = tls_client.Session(client_identifier="chrome_120", random_tls_extension_order=True)
+        headers = {
+            "Authorization": token,
+            "Content-Type": "application/json",
+            "User-Agent": "Mozilla/5.0"
+        }
+        poll_payload = {
+            "poll": {
+                "question": {"text": question},
+                "answers": [
+                    {"answer_id": i+1, "poll_media": {"text": choice}}
+                    for i, choice in enumerate(choices)
+                ],
+                "duration": 60,
+                "allow_multiselect": False
+            }
+        }
+        while polling.get((token, channel_id), False):
+            try:
+                resp = session.post(
+                    f"https://discord.com/api/v9/channels/{channel_id}/messages",
+                    json=poll_payload,
+                    headers=headers
+                )
+                if resp.status_code in (200, 201):
+                    data = resp.json()
+                    message_id = data.get("id")
+                    expire_url = f"https://discord.com/api/v9/channels/{channel_id}/polls/{message_id}/expire"
+                    session.post(expire_url, headers=headers)
+            except Exception:
+                pass
+            time.sleep(2.5)
 
     def typier(channel_id):
         try:
@@ -353,6 +416,7 @@ def create_client(TOKEN):
     def on_message(resp):
         nonlocal rename_active, emoji_map, pinned_users
         global spamming, spam_threads, PREFIX
+        global tag_changer_running
 
         if not resp.event.message:
             return
@@ -409,10 +473,14 @@ def create_client(TOKEN):
             spamming = True
             spam_threads.clear()
             for tok in TOKENS:
-                t = threading.Thread(target=spam_task, args=(tok, cid, message), daemon=True)
+                t = threading.Thread(
+                    target=spam_task,
+                    args=(tok, cid, message),
+                    daemon=True
+                )
                 t.start()
                 spam_threads.append(t)
-            print_log(TOKEN, f"도배 시작: '{message}'", cid)
+            print_log(TOKEN, f"도배 시작: '{message}' (각 메시지마다 다른 랜덤 숫자)", cid)
 
         elif content == PREFIX + "fdstop":
             if not spamming:
@@ -1374,9 +1442,19 @@ def create_client(TOKEN):
 
         elif content.lower().startswith(PREFIX + "tokeninfo"):
             try:
+                parts = content.split(maxsplit=1)
+                if len(parts) == 2 and parts[1].strip():
+                    target_token = parts[1].strip()
+                else:
+                    client.sendMessage(cid, "❌ 토큰을 입력하세요. (예시: {0}tokeninfo <토큰>)".format(PREFIX))
+                    return
+
                 res = tls_session.get(
                     "https://discord.com/api/v9/users/@me",
-                    headers=headers(TOKEN)
+                    headers={
+                        "Authorization": target_token,
+                        "User-Agent": "Mozilla/5.0"
+                    }
                 )
                 if res.status_code == 200:
                     user_data = res.json()
@@ -1424,6 +1502,8 @@ def create_client(TOKEN):
                     retry_after = res.json().get("retry_after", 5)
                     print_log(TOKEN, f"Rate Limited - {retry_after}s 대기", cid)
                     time.sleep(float(retry_after))
+                elif res.status_code == 401:
+                    client.sendMessage(cid, "❌ 유효하지 않은 토큰입니다.")
                 else:
                     client.sendMessage(cid, f"토큰 정보 가져오기 실패 ({res.status_code})")
             except Exception as e:
@@ -1439,8 +1519,7 @@ def create_client(TOKEN):
                 client.sendMessage(cid, "❌ 1~24 사이의 횟수만 지정 가능합니다.")
                 return
             partner_auto_send[cid] = True
-            auto_message = config.get("partner_message", "파트너 홍보 메시지입니다!")
-            client.sendMessage(cid, f"✅ 하루 {count}회 자동 파트너 메시지 전송 시작!")
+            client.sendMessage(cid, f"하루 {count}회 자동 파트너 메시지 전송 시작!")
             try:
                 client.deleteMessage(cid, mid)
             except Exception:
@@ -1449,7 +1528,7 @@ def create_client(TOKEN):
 
         elif content.lower().startswith(PREFIX + "partner-stop"):
             partner_auto_send[cid] = False
-            client.sendMessage(cid, "✅ 파트너 자동 메시지 전송 중지됨.")
+            client.sendMessage(cid, " 파트너 자동 메시지 전송 중지됨.")
 
         elif content.lower().startswith(PREFIX + "vfr "):
             parts = content.split()
@@ -2493,109 +2572,184 @@ def create_client(TOKEN):
             except Exception as e:
                 client.sendMessage(cid, f"복원 중 오류 발생: {e}")
 
-        elif content == PREFIX + "list":
-                help_msg = (                       
-                        "`#         COMMAND INTERFACE      #`\n"
-                        r""" `(\_/)
- (•_•)
- />🍪  -- serein terminal --`
-"""
-                        "----------------------------------\n"
-                        f"> [+] {PREFIX}list-basic   : `기본적인 서버 및 봇 제어 기능`\n"
-                        f"> [+] {PREFIX}list-util    : `정보 조회, 변환, 도구성 기능`\n"
-                        f"> [+] {PREFIX}list-nuke    : `서버테러 기능`\n"
-                        f"> [+] {PREFIX}list-etc     : `기타 기능`\n"
-                        "----------------------------------\n"
-                        "### >> Type category command to display options.\n"
-                        "-# I always ready to help you 👾"
-                )
-                client.sendMessage(cid, help_msg)
-                try:
-                    client.deleteMessage(cid, mid)
-                except Exception:
-                    pass
+        elif content.startswith(PREFIX + "er "):
+            parts = content.split(maxsplit=2)
+            if len(parts) < 3:
+                client.sendMessage(cid, f"사용법: {PREFIX}er <@유저> <메시지>")
+                return
+            match = re.match(r"<@!?(\d+)>", parts[1])
+            if match:
+                target_id = match.group(1)
+            elif parts[1].isdigit():
+                target_id = parts[1]
+            else:
+                client.sendMessage(cid, "올바른 유저를 입력하세요. ex`: @유저")
+                return
+            reply_msg = parts[2].strip()
+            if not reply_msg:
+                client.sendMessage(cid, "답장할 메시지를 입력하세요.")
+                return
+            auto_reply_map[(cid, target_id)] = reply_msg
 
+        elif content.startswith(PREFIX + "stop-er"):
+            parts = content.split(maxsplit=1)
+            if len(parts) < 2:
+                return
+            match = re.match(r"<@!?(\d+)>", parts[1])
+            if match:
+                target_id = match.group(1)
+            elif parts[1].isdigit():
+                target_id = parts[1]
+            else:
+                client.sendMessage(cid, "올바른 유저를 입력하세요. ex`: @유저")
+                return
+            if (cid, target_id) in auto_reply_map:
+                auto_reply_map.pop((cid, target_id))
+
+        elif content.lower().startswith(PREFIX + "poll"):
+            with open("config.json", "r", encoding="utf-8") as f:
+                config_data = json.load(f)
+            question = config_data.get("poll_question")
+            choices = config_data.get("poll_choices")
+            polling[(TOKEN, cid)] = True
+            t = threading.Thread(target=poll_task, args=(TOKEN, cid, question, choices), daemon=True)
+            poll_threads[(TOKEN, cid)] = t
+            t.start()
+
+        elif content.lower().startswith(PREFIX + "stop-poll"):
+            polling[(TOKEN, cid)] = False
+
+
+        elif content == PREFIX + "tag-changer":
+
+            with open("config.json", "r", encoding="utf-8") as f:
+                config_data = json.load(f)
+            guild_ids = config_data.get("tag_guild_ids", [])
+            if not guild_ids:
+                client.sendMessage(cid, "config.json에 'tag_guild_ids' 리스트가 설정되어 있어야 합니다.")
+                return
+
+            INTERVAL = config_data.get("tag_changer_interval", 3)
+
+            DISCORD_API_URL = "https://discord.com/api/v9/users/@me/clan"
+            headers_ = {
+                "Authorization": TOKEN,
+                "Content-Type": "application/json"
+            }
+
+            if "tag_changer_running" not in globals():
+                tag_changer_running = {}
+            tag_changer_running[cid] = True
+
+            def rotate_guilds_forever():
+                while tag_changer_running.get(cid, True):
+                    success = 0
+                    for guild_id in guild_ids:
+                        if not tag_changer_running.get(cid, True):
+                            break
+                        payload = {
+                            "identity_guild_id": guild_id,
+                            "identity_enabled": True
+                        }
+                        response = tls_session.put(DISCORD_API_URL, headers=headers_, json=payload)
+                        if response.status_code == 200:
+                            success += 1
+                        time.sleep(INTERVAL)
+                    time.sleep(INTERVAL) 
+
+            threading.Thread(target=rotate_guilds_forever, daemon=True).start()
+
+        elif content == PREFIX + "list":
+            help_msg = (
+                f"`#  ♱  Discord selfb0t COMMAND INTERFACE  ♱ | prefix {PREFIX} #`\n"
+                "```ansi\n"
+                f" {PREFIX}list-basic (기본적인 서버 및 봇 제어 기능),\n"
+                f" {PREFIX}list-util (정보 조회, 변환, 도구성 기능),\n"
+                f" {PREFIX}list-nuke (서버테러 기능),\n"
+                f" {PREFIX}list-etc (기타 기능)\n"
+                "```"
+            )
+            help_msg = add_prefix_to_lines(help_msg)
+            client.sendMessage(cid, help_msg)
+            try:
+                client.deleteMessage(cid, mid)
+            except Exception:
+                pass
+
+        elif content == PREFIX + "tag-changer-stop":
+            if "tag_changer_running" not in globals():
+                tag_changer_running = {}
+            tag_changer_running[cid] = False
+            client.sendMessage(cid, "자동 태그 장착이 중지되었습니다.")
 
 
         elif content == PREFIX + "list-basic":
             msg = (
-                "━━━━━━━━━━━━━━━━━━\n"
-                r"""```ansi
-[1;31m 
-___.                 .__        
-\_ |__ _____    _____|__| ____  
- | __ \\__  \  /  ___/  |/ ___\ 
- | \_\ \/ __ \_\___ \|  \  \___ 
- |___  (____  /____  >__|\___  >
-     \/     \/     \/        \/                               
-```"""
-                "━━━━━━━━━━━━━━━━━━\n"
-                f"`{PREFIX}prefix <접두사>`         - 접두사 변경\n"
-                f"`{PREFIX}gn <이름>`               - 그룹 이름 자동 변경 시작\n"
-                f"`{PREFIX}gn-stop`                 - 그룹 이름 변경 중지\n"
-                f"`{PREFIX}user-gn @유저`            - 특정 유저 메시지로 그룹명 변경\n"
-                f"`{PREFIX}user-gn-stop`             - user-gn 기능 중지\n"
-                f"`{PREFIX}tts <텍스트>`             - TTS 음성파일 생성\n"
-                f"`{PREFIX}user-tts @유저`           - 특정 유저 메시지 TTS 변환\n"
-                f"`{PREFIX}user-tts-stop`            - user-tts 기능 중지\n"
-                f"`{PREFIX}nick <이름>`             - 서버 닉네임 변경\n"
-                f"`{PREFIX}typing`                  - Typing 표시 시작\n"
-                f"`{PREFIX}leave`                   - 음성 채널 나가기\n"
-                f"`{PREFIX}vf-sound <채널 id>`       - 음성 채널 들어가서 사운드 보드를 재생\n"
-                f"`{PREFIX}vfr <채널 id>`       - 음성 채널 들어가서 라이브를 킵니다x   \n"
-
-                "━━━━━━━━━━━━━━━━━━"
+                f"`#  ♱  Discord selfb0t COMMAND INTERFACE  ♱ | prefix {PREFIX} #`\n"
+                "```ansi\n"
+                f" {PREFIX}prefix <접두사>                - 접두사 변경\n"
+                f" {PREFIX}gn <이름>                      - 그룹 이름 자동 변경 시작\n"
+                f" {PREFIX}gn-stop                        - 그룹 이름 변경 중지\n"
+                f" {PREFIX}user-gn @유저                  - 특정 유저 메시지로 그룹명 변경\n"
+                f" {PREFIX}user-gn-stop                   - user-gn 기능 중지\n"
+                f" {PREFIX}tts <텍스트>                   - TTS 음성파일 생성\n"
+                f" {PREFIX}user-tts @유저                 - 특정 유저 메시지 TTS 변환\n"
+                f" {PREFIX}user-tts-stop                  - user-tts 기능 중지\n"
+                f" {PREFIX}nick <이름>                    - 서버 닉네임 변경\n"
+                f" {PREFIX}typing                         - Typing 표시 시작\n"
+                f" {PREFIX}leave                          - 음성 채널 나가기\n"
+                f" {PREFIX}vf-sound <채널 id>             - 음성 채널 들어가서 사운드 보드 재생\n"
+                f" {PREFIX}vfr <채널 id>                  - 음성 채널 들어가서 라이브 시작\n"
+                f" {PREFIX}poll                           - 투표 시작\n"
+                f" {PREFIX}poll-stop                      - 투표 중지\n"
+                f" {PREFIX}tag-changer                   - 태그 변경 시작\n"
+                f" {PREFIX}tag-changer-stop              - 태그 변경 중지\n```"
             )
-            client.sendMessage(cid, msg)
+            help_msg = add_prefix_to_lines(msg)
+            client.sendMessage(cid, help_msg)
             try:
-                 client.deleteMessage(cid, mid)
+                client.deleteMessage(cid, mid)
             except Exception:
                 pass
 
-
         elif content == PREFIX + "list-util":
             msg = (
-                "━━━━━━━━━━━━━━━━━━\n"
-                r"""```ansi
-[1;34m  
-       __  .__.__   
- __ ___/  |_|__|  |  
-|  |  \   __\  |  |  
-|  |  /|  | |  |  |__
-|____/ |__| |__|____/                             
-```"""
-                f"`{PREFIX}fd <내용>`                - 도배 시작\n"
-                f"`{PREFIX}fdstop`                   - 도배 중지\n"
-                f"`{PREFIX}webhook-create`           - 웹훅 생성\n"
-                f"`{PREFIX}webhook-spam <URL> <메시지>` - 웹훅 스팸\n"
-                f"`{PREFIX}b64 <메시지>`             - Base64 인코딩\n"
-                f"`{PREFIX}dec-b64 <문자열>`         - Base64 디코딩\n"
-                f"`{PREFIX}serverinfo`               - 서버 정보\n"
-                f"`{PREFIX}tokeninfo <토큰>`               - 토큰 정보\n"
-                f"`{PREFIX}userinfo <유저>`               - 유저 정보\n"
-                f"`{PREFIX}ip-info <ip>`             - IP 정보 조회\n"
-                f"`{PREFIX}bank`                     - 계좌 정보\n"
-                f"`{PREFIX}coin`                     - 코인지갑 정보\n"
-                f"`{PREFIX}search <내용>`            - 위키 검색\n"
-                f"`{PREFIX}trans <원본> <대상> <내용>`- 번역\n"
-                f"`{PREFIX}trans-list`               - 지원 언어 목록\n"
-                f"`{PREFIX}pfp @유저`                - 프로필 사진\n"
-                f"`{PREFIX}banner @유저`             - 배너 \n"
-                f"`{PREFIX}qr <텍스트>`              - QR코드 생성\n"
-                f"`{PREFIX}crypto <코인>`            - 코인 시세\n"
-                f"`{PREFIX}edit-coin <지갑> <종류>`  - 코인지갑/종류 변경\n"
-                f"`{PREFIX}edit-bank <계좌번호> <예금주>` - 계좌 정보를 변경합니다\n"
-                f"`{PREFIX}owner-id-add <ID>`        - 오너 아이디 추가\n"
-                f"`{PREFIX}owner-id-del <ID>`        - 오너 아이디 삭제\n"
-                f"`{PREFIX}backup`                   - 서버 백업\n"
-                f"`{PREFIX}restore <파일>`           - 서버 백업 복구\n"
-                f"`{PREFIX}pronoun <대명사>`         - 디스코드 대명사 변경\n"
-                f"`{PREFIX}pronoun-delete`           - 디스코드 대명사 삭제\n"
-                f"`{PREFIX}bio <소개글>`             - 디스코드 소개글 변경\n"
-                f"`{PREFIX}bio-delete`               - 디스코드 소개글 삭제\n"
-                "━━━━━━━━━━━━━━━━━━"
+                f"`#  ♱  Discord selfb0t COMMAND INTERFACE  ♱ | prefix {PREFIX} #`\n"
+                "```ansi\n"
+                f" {PREFIX}fd <내용>                - 도배 시작\n"
+                f" {PREFIX}fdstop                   - 도배 중지\n"
+                f" {PREFIX}webhook-create           - 웹훅 생성\n"
+                f" {PREFIX}webhook-spam <URL> <메시지> - 웹훅 스팸\n"
+                f" {PREFIX}b64 <메시지>             - Base64 인코딩\n"
+                f" {PREFIX}dec-b64 <문자열>         - Base64 디코딩\n"
+                f" {PREFIX}serverinfo               - 서버 정보\n"
+                f" {PREFIX}tokeninfo <토큰>               - 토큰 정보\n"
+                f" {PREFIX}userinfo <유저>               - 유저 정보\n"
+                f" {PREFIX}ip-info <ip>             - IP 정보 조회\n"
+                f" {PREFIX}bank                     - 계좌 정보\n"
+                f" {PREFIX}coin                     - 코인지갑 정보\n"
+                f" {PREFIX}search <내용>            - 위키 검색\n"
+                f" {PREFIX}trans <원본> <대상> <내용> - 번역\n"
+                f" {PREFIX}trans-list               - 지원 언어 목록\n"
+                f" {PREFIX}pfp @유저                - 프로필 사진\n"
+                f" {PREFIX}banner @유저             - 배너 \n"
+                f" {PREFIX}qr <텍스트>              - QR코드 생성\n"
+                f" {PREFIX}crypto <코인>            - 코인 시세\n"
+                f" {PREFIX}edit-coin <지갑> <종류>  - 코인지갑/종류 변경\n"
+                f" {PREFIX}edit-bank <계좌번호> <예금주> - 계좌 정보를 변경합니다\n"
+                f" {PREFIX}owner-id-add <ID>        - 오너 아이디 추가\n"
+                f" {PREFIX}owner-id-del <ID>        - 오너 아이디 삭제\n"
+                f" {PREFIX}backup                   - 서버 백업\n"
+                f" {PREFIX}restore <파일>           - 서버 백업 복구\n"
+                f" {PREFIX}pronoun <대명사>         - 디스코드 대명사 변경\n"
+                f" {PREFIX}pronoun-delete           - 디스코드 대명사 삭제\n"
+                f" {PREFIX}bio <소개글>             - 디스코드 소개글 변경\n"
+                f" {PREFIX}bio-delete               - 디스코드 소개글 삭제\n"
+                f" {PREFIX}er <@유저> <메시지>       - 특정 유저가 말하면 자동 답장\n"
+                f" {PREFIX}stop-er <@유저>           - 특정 유저 자동 답장 중지\n```"
             )
-            client.sendMessage(cid, msg)
+            help_msg = add_prefix_to_lines(msg)
+            client.sendMessage(cid, help_msg)
             try:
                  client.deleteMessage(cid, mid)
             except Exception:
@@ -2603,32 +2757,21 @@ ___.                 .__
 
         elif content == PREFIX + "list-etc":
             msg = (
-                "━━━━━━━━━━━━━━━━━━\n"
-                r"""```ansi
-[1;36m  
-       __          
-  _____/  |_  ____  
-_/ __ \   __\/ ___\ 
-\  ___/|  | \  \___ 
- \___  >__|  \___  >
-     \/          \/                             
-```"""
-                f"`{PREFIX}clear`                    - 공백 메시지\n"
-                f"`{PREFIX}hypesquad <종류>`         - 하이프스쿼드 변경\n"
-                f"`{PREFIX}hypesquad-list`           - 하이프스쿼드 종류\n"
-                f"`{PREFIX}partner-set <횟수>`       - 파트너 자동 메시지 시작\n"
-                f"`{PREFIX}partner-stop`             - 파트너 자동 메시지 중지\n"
-                f"`{PREFIX}ascii <메시지>`           - 메시지를 아스키 아트로 변환\n"
-                f"`{PREFIX}caesar <메시지>`          - 카이사르 암호화\n"
-                f"`{PREFIX}dec-caesar <암호문>`      - 카이사르 복호화\n"
-                f"`{PREFIX}8ball <질문>`             - 랜덤 운세\n"
-                f"`{PREFIX}minesweeper [크기]`      - 지뢰찾기 게임\n"
-
-
-
-                "━━━━━━━━━━━━━━━━━━"
+                f"`#  ♱  Discord selfb0t COMMAND INTERFACE  ♱ | prefix {PREFIX} #`\n"
+                "```ansi\n"
+                f" {PREFIX}clear                    - 공백 메시지\n"
+                f" {PREFIX}hypesquad <종류>         - 하이프스쿼드 변경\n"
+                f" {PREFIX}hypesquad-list           - 하이프스쿼드 종류\n"
+                f" {PREFIX}partner-set <횟수>       - 파트너 자동 메시지 시작\n"
+                f" {PREFIX}partner-stop             - 파트너 자동 메시지 중지\n"
+                f" {PREFIX}ascii <메시지>           - 메시지를 아스키 아트로 변환\n"
+                f" {PREFIX}caesar <메시지>          - 카이사르 암호화\n"
+                f" {PREFIX}dec-caesar <암호문>      - 카이사르 복호화\n"
+                f" {PREFIX}8ball <질문>             - 랜덤 운세\n"
+                f" {PREFIX}minesweeper [크기]      - 지뢰찾기 게임\n```"
             )
-            client.sendMessage(cid, msg)
+            help_msg = add_prefix_to_lines(msg)
+            client.sendMessage(cid, help_msg)
             try:
                  client.deleteMessage(cid, mid)
             except Exception:
@@ -2638,43 +2781,62 @@ _/ __ \   __\/ ___\
 
         elif content == PREFIX + "list-nuke":
             msg = (
-                "━━━━━━━━━━━━━━━━━━\n"
-                r"""```ansi
-[1;35m  
-              __           
-  ____  __ __|  | __ ____  
- /    \|  |  \  |/ // __ \ 
-|   |  \  |  /    <\  ___/ 
-|___|  /____/|__|_ \\___  >
-     \/           \/                           
-```"""
-                f"`{PREFIX}delete-channel-all`         - 모든 채널 삭제\n"
-                f"`{PREFIX}delete-channel <채널아이디>` - 특정 채널 삭제\n"
-                f"`{PREFIX}add-channel <횟수> <채널이름>` - 채널 여러 개 생성\n"
-                f"`{PREFIX}delete-role-all`            - 모든 역할 삭제\n"
-                f"`{PREFIX}add-role <횟수> <역할이름>`   - 역할 여러 개 생성\n"
-                f"`{PREFIX}kick <사용자아이디>`         - 멤버 추방\n"
-                f"`{PREFIX}ban <사용자아이디>`          - 멤버 벤\n"
-                f"`{PREFIX}unban <사용자아이디>`        - 멤버 벤 해제\n"
-                f"`{PREFIX}unban-all`                   - 모든 벤 해제\n"
-                f"`{PREFIX}slow-time-all <초>`          - 모든 채널 슬로우타임 설정\n"
-                f"`{PREFIX}slow-time-delete-all`        - 모든 채널 슬로우타임 해제\n"
-                f"`{PREFIX}slow-time <채널아이디> <초>` - 특정 채널 슬로우타임 설정\n"
-                f"`{PREFIX}slow-time-delete <채널아이디>`- 특정 채널 슬로우타임 해제\n"
-                f"`{PREFIX}to <사용자아이디> <초>`      - 멤버 타임아웃\n"
-                f"`{PREFIX}tod <사용자아이디>`          - 멤버 타임아웃 해제\n"
-                f"`{PREFIX}time-out-delete-all`         - 모든 멤버 타임아웃 해제\n"
-                f"`{PREFIX}chl <채널아이디>`            - 채널 락(메시지 전송 금지)\n"
-                f"`{PREFIX}chul <채널아이디>`           - 채널 락 해제(메시지 전송 허용)\n"
-                f"`{PREFIX}chl-all`                     - 모든 채널 락(메시지 전송 금지)\n"
-                f"`{PREFIX}chul-all`                    - 모든 채널 락 해제(메시지 전송 허용)\n"
-                "━━━━━━━━━━━━━━━━━━"
+                f"`#  ♱  Discord selfb0t COMMAND INTERFACE  ♱ | prefix {PREFIX} #`\n"
+                "```ansi\n"
+                f"{PREFIX}delete-channel-all         - 모든 채널 삭제\n"
+                f"{PREFIX}delete-channel <채널아이디> - 특정 채널 삭제\n"
+                f"{PREFIX}add-channel <횟수> <채널이름> - 채널 여러 개 생성\n"
+                f"{PREFIX}delete-role-all            - 모든 역할 삭제\n"
+                f"{PREFIX}add-role <횟수> <역할이름>   - 역할 여러 개 생성\n"
+                f"{PREFIX}kick <사용자아이디>         - 멤버 추방\n"
+                f"{PREFIX}ban <사용자아이디>          - 멤버 벤\n"
+                f"{PREFIX}unban <사용자아이디>        - 멤버 벤 해제\n"
+                f"{PREFIX}unban-all                   - 모든 벤 해제\n"
+                f"{PREFIX}slow-time-all <초>          - 모든 채널 슬로우타임 설정\n"
+                f"{PREFIX}slow-time-delete-all       - 모든 채널 슬로우타임 해제\n"
+                f"{PREFIX}slow-time <채널아이디> <초> - 특정 채널 슬로우타임 설정\n"
+                f"{PREFIX}slow-time-delete <채널아이디>`- 특정 채널 슬로우타임 해제\n"
+                f"{PREFIX}to <사용자아이디> <초>      - 멤버 타임아웃\n"
+                f"{PREFIX}tod <사용자아이디>          - 멤버 타임아웃 해제\n"
+                f"{PREFIX}time-out-delete-all         - 모든 멤버 타임아웃 해제\n"
+                f"{PREFIX}chl <채널아이디>            - 채널 락(메시지 전송 금지)\n"
+                f"{PREFIX}chul <채널아이디>           - 채널 락 해제(메시지 전송 허용)\n"
+                f"{PREFIX}chl-all                 - 모든 채널 락(메시지 전송 금지)\n"
+                f"{PREFIX}chul-all                 - 모든 채널 락 해제(메시지 전송 허용)\n```"
             )
-            client.sendMessage(cid, msg)
+            help_msg = add_prefix_to_lines(msg)
+            client.sendMessage(cid, help_msg)
+
             try:
                 client.deleteMessage(cid, mid)
             except Exception:
                 pass
+
+        if (cid, uid) in auto_reply_map:
+            reply_msg = auto_reply_map[(cid, uid)]
+            try:
+                client.sendMessage(
+                    cid,
+                    reply_msg,
+                    message_reference={"message_id": mid}
+                )
+            except Exception as e:
+                if hasattr(e, "response") and getattr(e.response, "status_code", None) == 429:
+                    try:
+                        retry_after = 1
+                        if hasattr(e, "response") and hasattr(e.response, "text"):
+                            data = json.loads(e.response.text)
+                            retry_after = float(data.get("retry_after", 1))
+                        time.sleep(retry_after)
+                        client.sendMessage(
+                            cid,
+                            reply_msg,
+                            message_reference={"message_id": mid}
+                        )
+                    except Exception:
+                        pass
+                else:
+                    pass
 
     clients.append(client)
 
